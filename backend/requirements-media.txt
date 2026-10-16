@@ -1,0 +1,7 @@
+# Optional local media extraction / transcription dependencies.
+-r requirements.txt
+imageio-ffmpeg>=0.6,<0.7
+faster-whisper>=1.2,<1.3
+pymupdf>=1.26,<2
+python-pptx>=1.0,<2
+# ASR model weights are downloaded separately and verified before use.

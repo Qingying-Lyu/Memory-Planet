@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "知温页面读取",
+  "version": "0.1.0",
+  "description": "由用户主动读取当前课程页面或选中内容，预览后导出到本地知温。",
+  "permissions": ["activeTab", "scripting"],
+  "action": {"default_title": "读取到知温", "default_popup": "popup.html"}
+}

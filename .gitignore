@@ -1,0 +1,13 @@
+data/
+backups/
+课程/
+课程库/
+recovery/
+runtime/
+models/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.zip

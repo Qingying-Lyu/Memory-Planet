@@ -1,0 +1,24 @@
+[Unit]
+Description=Zhiwen private staging API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/zhiwen
+Environment=ZHIWEN_STARFLOW_KEY_FILE=/home/ubuntu/.config/zhiwen/API-Key.txt
+Environment=ZHIWEN_KS3_CREDENTIALS_FILE=/home/ubuntu/.config/zhiwen/KS3.txt
+ExecStart=/home/ubuntu/zhiwen/.venv/bin/python -m backend.cloud_start
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/zhiwen/data
+
+[Install]
+WantedBy=multi-user.target
