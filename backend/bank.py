@@ -68,16 +68,19 @@ def register(run_id, owner):
             ids=policy.question_materials(package,q,mapping)
             if not ids or any(not rows[mid]['learned'] or rows[mid]['remaining']<=0 for mid in ids):continue
             managed=any(rows[mid].get('budget_rule') in ('knowledge-v1','knowledge-v2') for mid in ids)
+            if not managed:continue  # Legacy text length cannot authorize new questions.
             stable=None
             if managed:
-                from .knowledge import validate_admission,mastery_key
-                stable=validate_admission(db,package,q,owner)
-                if not stable:continue
+                from .knowledge import mastery_key
+                from .question_quota import coverage,charge
+                checked=coverage(db,package,q,owner)
+                if not checked:continue
+                stable,angle_ids=checked
             normalized=''.join(q['prompt'].lower().split())
             if any(SequenceMatcher(None,normalized,old).ratio()>=.78 for old in prompts):continue
             if db.execute('SELECT 1 FROM question_bank WHERE owner=? AND course_id=? AND fingerprint=?',(owner,package['course_id'],fingerprint(q))).fetchone():continue
             db.execute('INSERT INTO question_bank VALUES(?,?,?,?,?,?,?,?)',(owner,package['course_id'],run_id,q['id'],q['kind'],fingerprint(q),mastery_key(db,package['course_id'],stable) if stable else concept_key(package,q),datetime.now(timezone.utc).isoformat()))
-            if stable:db.execute('INSERT INTO knowledge_questions VALUES(?,?,?,?,?)',(owner,run_id,q['id'],stable,q['kind']))
+            if stable:charge(db,owner,run_id,q['id'],stable,q['kind'],angle_ids)
             for mid in ids:
                 db.execute('INSERT INTO bank_materials VALUES(?,?,?,?)',(owner,run_id,q['id'],mid));rows[mid]['remaining']-=1
             prompts.append(normalized)
@@ -123,6 +126,7 @@ def entries(owner, course_id=None):
                           (' AND course_id=?' if course_id else '') + ' ORDER BY created_at,run_id,question_id',
                           (owner, course_id) if course_id else (owner,)).fetchall()
     result, packages = [], {}
+    validation_context={}
     for row in rows:
         row = dict(row)
         if row['run_id'] not in packages:
@@ -135,7 +139,7 @@ def entries(owner, course_id=None):
             q = next((q for q in package['questions'] if q['id'] == row['question_id']), None)
             if q:
                 from .material_policy import check_question
-                try:check_question(package,q,owner)
+                try:check_question(package,q,owner,context=validation_context)
                 except (ValueError,LookupError):continue
                 result.append({**row, 'question': q})
     return result
@@ -197,7 +201,7 @@ def start_review(run_id, question_id, owner):
     return practice.start(run_id, question_id, owner, mode='review')
 
 
-def review_plan(course_id, owner, count=5):
+def review_plan(course_id, owner, count=30):
     from .library import allowed
     with connect() as db:
         allowed(db, course_id, owner)

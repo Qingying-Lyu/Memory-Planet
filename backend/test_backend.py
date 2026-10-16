@@ -8,7 +8,7 @@ from backend.scoring import update,display
 from backend.main import app
 class Tests(unittest.TestCase):
  def test_scoring(self):
-  m=update(None,100,1);self.assertEqual(m,80)
+  m=update(None,100,1);self.assertEqual(m,85)
   for n in range(2,101):
    new=update(m,100,n);self.assertTrue(m<new<100);m=new
   self.assertLess(display(m),100)

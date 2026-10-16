@@ -17,6 +17,7 @@ class Concept(Strict):
     title: str = Field(min_length=2)
     summary: str
     evidence: list[Evidence] = Field(min_length=1)
+    angles: list[dict] = Field(default_factory=list)
 
 
 class Framework(Strict):
@@ -43,6 +44,7 @@ class Question(Strict):
     explanation: str
     evidence: list[Evidence] = Field(min_length=1)
     rubric: list[Rubric]
+    angle_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode='after')
     def check(self):

@@ -35,6 +35,19 @@ class GenerationReliabilityTests(unittest.TestCase):
     if '独立作答并审题' in instruction:return {'reviews':[{'id':q['id'],'answer_index':0,'grounded':True,'unambiguous':True,'challenging':True,'novel':True,'in_scope':True,'reason':'符合原文'} for q in data['questions']]},{}
     raise AssertionError('Unexpected test stage')
   return Client()
+ def test_blind_review_contract_explicitly_requires_novel_field(self):
+  mid=self.material('审题字段契约','缓存未命中时，应回源获取内容。')
+  policy.set_learned(self.course,mid,'local-owner');parent=self.client()
+  class ContractAware:
+   def json(self,model,instruction,data):
+    value,meta=parent.json(model,instruction,data)
+    if '独立作答并审题' in instruction and 'novel' not in instruction.split('reason。')[0]:
+     for item in value['reviews']:item.pop('novel',None)
+    return value,meta
+  with patch.object(pipeline,'model_target',return_value=(ContractAware(),'test-model')):
+   run=pipeline.run_sample(course_id=self.course,material_id=mid,choice_count=1)
+  self.assertEqual(bank.register(run,'local-owner'),1)
+
  def test_newly_learned_material_generates_and_enters_daily_without_manual_bank(self):
   mid=self.material('新资料','缓存未命中时，应回源获取内容。\n\n缓存命中时，直接返回缓存内容。')
   self.assertFalse(challenges.courses('local-owner'))

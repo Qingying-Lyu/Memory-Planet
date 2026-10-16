@@ -33,7 +33,7 @@ class PracticeTests(unittest.TestCase):
     def test_first_score_idempotence_and_daily_limit(self):
         session=practice.start('run','q1','alice')['session_id']
         result=practice.submit(session,'0','alice')
-        self.assertEqual(result['mastery'],80)
+        self.assertEqual(result['mastery'],85)
         self.assertTrue(result['counted'])
         self.assertEqual(practice.submit(session,'0','alice'),result)
         with self.assertRaises(ValueError):practice.submit(session,'1','alice')

@@ -140,14 +140,14 @@ def run_sample(resume=None, course_id=None, batch_start=0, batch_size=70, choice
         registered,stable_ids=stable_framework(course_id,'local-owner',rows,'single_choice' if choice_count else 'short_answer' if short_only else None,selection_seed=selection_seed) if evidence_map else ({}, {})
         managed=bool(evidence_map and any(m.get('budget_rule') in ('knowledge-v1','knowledge-v2') for m in material_rows if set(m['documents'])&permitted))
         if managed and not stable_ids:raise ValueError('当前批次没有剩余的已审核知识点额度')
-        framework_data = registered if stable_ids else call('framework', 'qwen3.8-max',
+        framework_data = registered if stable_ids else call('framework', 'mimo-v2.6-pro',
             '提炼3至5个核心知识点，ID为c1等。每个引用quote必须是对应block的连续原文，不能改写。'
             '严格遵循JSON schema：' + json.dumps(Framework.model_json_schema(), ensure_ascii=False),
             {'course': course_id, 'blocks': blocks, 'scope_mapping': evidence_map})
         try:
             framework = Framework.model_validate(framework_data) if not stable_ids else None
         except ValueError:
-            framework_data = call('repair_framework_schema', 'qwen3.8-max',
+            framework_data = call('repair_framework_schema', 'mimo-v2.6-pro',
                 '修正知识点JSON以符合schema。引用必须至少5字符且逐字连续摘自给定原文；'
                 '不能补充事实，不能降低约束。schema：' + json.dumps(Framework.model_json_schema(), ensure_ascii=False),
                 {'draft': framework_data, 'blocks': blocks})
@@ -176,7 +176,7 @@ def run_sample(resume=None, course_id=None, batch_start=0, batch_size=70, choice
                     if feedback.exists():prior_feedback.extend(json.loads(feedback.read_text(encoding='utf-8'))[:4])
                     if len(prior_feedback)>=8:break
                 except (OSError,ValueError):continue
-        question_data = call('questions', 'deepseek-v4-pro-0813',
+        question_data = call('questions', 'mimo-v2.6-pro',
             (f'生成{mixed_count}道简答题，不生成选择题。' if short_only else f'生成{choice_count}道全新场景单选题，不生成简答题。' if choice_count else
              f'生成{mixed_count}题：其中1道简答题，其余为有实际约束的场景单选题。') + '单选用于每日挑战，'
             '每题需辨析机制、排障顺序或方案取舍，禁止只问术语定义、模块名称、直接抄写或单步代入公式。'
@@ -187,7 +187,7 @@ def run_sample(resume=None, course_id=None, batch_start=0, batch_size=70, choice
             '不得把“独立产品线”等描述扩大为“任何情况下不能替代”等绝对结论。'
             '选项不加ABCD前缀，answer_index从0开始。所有题引用原文quote必须逐字连续摘录。'
             '简答量表写清完整、部分和不得分条件（含语义矛盾）。选择题rubric为空。'
-            '每题concept_id必须且只能是framework中的单个编号，禁止c1;c2、c1,c2或数组。同批单选题的主考点不得重复，每个知识点仅有1道单选额度；宁可少出，不能复用同一主考点凑数。综合题选择一个有原文依据的主考点，不得拼接多个编号。'
+            '每题concept_id必须且只能是framework中的单个编号，禁止c1;c2、c1,c2或数组。每题angle_ids必须选自该主考点给定的angles，准确列出题目实际覆盖的考查目标；不得通过换题型重复考同一角度。同一主考点可以按不同已审核角度分别出题，不得重复已覆盖的目标。宁可少出，不能凑数。综合题选择一个有原文依据的主考点，不得拼接多个编号。'
             '只使用给定知识点。严格遵循JSON schema：' + json.dumps(Questions.model_json_schema(), ensure_ascii=False) +
             '\n以上schema仅作校验。现在必须输出实际生成的题目数据，最外层仅有questions数组。'
             '绝对不能返回schema本身、$defs、properties或type定义。',
@@ -206,7 +206,7 @@ def run_sample(resume=None, course_id=None, batch_start=0, batch_size=70, choice
                     except ValueError:validation_holds.append({'draft':draft,'stage':'question_schema','reason':'单题结构校验失败'})
             if survivors:questions=Questions(questions=survivors)
             else:
-                question_data = call('repair_questions_schema', 'qwen3.8-max',
+                question_data = call('repair_questions_schema', 'mimo-v2.6-pro',
                     '上次输出不是有效题目数据。依据原文重新输出实际题目，绝不能返回JSON schema本身。'
                     'choice_count非空时只生成指定数量的single_choice题，不得生成简答题。'
                     '最外层为questions数组，每题字段严格符合这个schema：' +
@@ -218,7 +218,7 @@ def run_sample(resume=None, course_id=None, batch_start=0, batch_size=70, choice
         primary_valid=[]
         for q in questions.questions:
             try:
-                primary_valid.append(validate_primary_concept(q,concept_ids,lambda draft,allowed:call('repair_primary_'+draft['id'],'qwen3.8-max',
+                primary_valid.append(validate_primary_concept(q,concept_ids,lambda draft,allowed:call('repair_primary_'+draft['id'],'mimo-v2.6-pro',
                     '仅修复concept_id字段：从allowed_ids选择唯一主考点编号，不得拼接。必须对应题目实际考查内容和原文依据；其他所有字段逐字不变。输出完整题目JSON。',
                     {'question':draft,'allowed_ids':allowed,'framework':framework_data})))
             except (ValueError,CloudError):validation_holds.append({'draft':q.model_dump(),'stage':'primary_concept','reason':'主考点校验或修复未通过'})
@@ -238,7 +238,7 @@ def run_sample(resume=None, course_id=None, batch_start=0, batch_size=70, choice
                     layout_repairs.extend(restore_quote_whitespace(question.evidence, blocks))
                     validate_evidence(question.evidence, blocks)
                 except ValueError:
-                    repaired = call('repair_' + question.id, 'qwen3.8-max',
+                    repaired = call('repair_' + question.id, 'mimo-v2.6-pro',
                         '这道题引用校验失败。仅修正evidence中的quote，使它逐字摘自对应block；'
                         '其他字段全部保持不变，不能补充事实。输出完整题目JSON。',
                         {'question': question.model_dump(),
@@ -254,12 +254,12 @@ def run_sample(resume=None, course_id=None, batch_start=0, batch_size=70, choice
         save('validation_holds',validation_holds)
         if not questions.questions:raise ValueError('本批无通过结构与引用校验的题目')
         save('quote_layout_repairs', layout_repairs)
-        blind_questions = [{'id': q.id, 'kind': q.kind, 'prompt': q.prompt, 'options': q.options}
+        blind_questions = [{'id': q.id, 'kind': q.kind, 'prompt': q.prompt, 'options': q.options, 'concept_id':q.concept_id,'angle_ids':q.angle_ids}
                            for q in questions.questions]
         review_instruction = (
-            '独立作答并审题，你看不到出题者答案。逐题输出reviews数组，每项仅含id、answer_index'
+            '独立作答并审题，你看不到出题者答案。若框架含angles，必须核对题目实际考查目标与angle_ids一致，且覆盖均属于主考点；不一致则grounded=false。逐题输出reviews数组，每项仅含id、answer_index'
             '（简答为null）、answer（独立解答）、grounded（布尔）、unambiguous（布尔）、'
-            'challenging（布尔，是否需要应用或推理）、in_scope（布尔，解题是否仅需要给定范围主题）、reason。'
+            'challenging（布尔，是否需要应用或推理）、in_scope（布尔，解题是否仅需要给定范围主题）、novel（布尔，是否区别于历史题）、reason。'
             '题干条件不足或多个选项合理必须判不通过。范围映射非空时，任何需要范围外知识的题均判in_scope=false。'
             '与历史题只有措辞、数字或选项顺序变化的判novel=false。输出novel布尔。'
             'reason简明说明，每题不超过200字。')
@@ -269,7 +269,7 @@ def run_sample(resume=None, course_id=None, batch_start=0, batch_size=70, choice
             needed={e.block for q in questions.questions if q.id in {x['id'] for x in group} for e in q.evidence}
             try:
                 part=call(f'blind_review_part_{offset//2}','glm-5.3',review_instruction,
-                    {'questions':group,'blocks':{i:blocks[i] for i in needed},'scope_mapping':{i:evidence_map[i] for i in needed if i in evidence_map},'previous_questions':previous_questions or []})
+                    {'framework':framework_data,'questions':group,'blocks':{i:blocks[i] for i in needed},'scope_mapping':{i:evidence_map[i] for i in needed if i in evidence_map},'previous_questions':previous_questions or []})
                 if not isinstance(part.get('reviews'),list):raise ValueError('独立审题结果缺失')
                 for item in group:
                     matches=[r for r in part['reviews'] if isinstance(r,dict) and r.get('id')==item['id']]

@@ -17,12 +17,17 @@ class DeletionTests(unittest.TestCase):
         self.other=learning.create('bob','其他用户课程','training')['id']
         for title in ('资料一','资料二'):learning.add(self.course,'alice',title,'text',text='缓存可以减少回源请求。'+title+'字'*2000)
         self.materials=material_policy.materials(self.course,'alice')
-        for m in self.materials:material_policy.set_learned(self.course,m['id'],'alice')
+        for m in self.materials:
+            from .test_quota_fixtures import reviewed
+            with connect(self.db) as db:reviewed(db,self.course,m['id'])
+            material_policy.set_learned(self.course,m['id'],'alice')
         self.run='1'*32;rows=library.evidence(self.course,'alice');questions=[];concepts=[]
         for i,row in enumerate(rows,1):
             q=sample_question();q.update(id=f'q{i}',concept_id=f'c{i}',prompt=hashlib.sha256(str(i).encode()).hexdigest()+'场景判断',evidence=[{'block':i,'quote':'缓存可以减少回源请求'}])
             questions.append(q);concepts.append({'id':f'c{i}','title':'缓存'+str(i),'summary':'缓存原理','evidence':q['evidence']})
         self.data={'run_id':self.run,'course_id':self.course,'questions':questions,'framework':{'concepts':concepts},'evidence_map':{str(i):{k:row[k] for k in ('document_id','ordinal','digest','scope_revision')} for i,row in enumerate(rows,1)}}
+        with connect(self.db) as db:
+            self.data['stable_concepts']={f'c{i}':db.execute('SELECT concept_id FROM knowledge_evidence WHERE document_id=?',(row['document_id'],)).fetchone()[0] for i,row in enumerate(rows,1)}
         self.folder=self.root/'data/runs'/self.run;self.folder.mkdir(parents=True)
         self.manifest={'owner':'alice','course_id':self.course,'state':'review_preview'}
         self.save();bank.register(self.run,'alice')

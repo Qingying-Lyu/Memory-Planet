@@ -156,6 +156,8 @@ def _delete(course_id,owner,mode,material_ids=()):
                 db.execute('DELETE FROM bank_materials WHERE owner=? AND material_id=?',(owner,mid))
                 if 'material_versions' in tables:db.execute('DELETE FROM material_versions WHERE material_id=?',(mid,))
                 if 'material_heads' in tables:db.execute('DELETE FROM material_heads WHERE id=?',(mid,))
+                if 'knowledge_angle_sources' in tables:db.execute('DELETE FROM knowledge_angle_sources WHERE material_id=?',(mid,))
+                if 'knowledge_evidence_blocks' in tables:db.execute('DELETE FROM knowledge_evidence_blocks WHERE material_id=?',(mid,))
                 if 'knowledge_evidence' in tables:db.execute('DELETE FROM knowledge_evidence WHERE material_id=?',(mid,))
                 if 'knowledge_pending' in tables:db.execute('DELETE FROM knowledge_pending WHERE material_id=?',(mid,))
                 if 'knowledge_progress' in tables:db.execute('DELETE FROM knowledge_progress WHERE material_id=?',(mid,))
@@ -164,6 +166,12 @@ def _delete(course_id,owner,mode,material_ids=()):
                 if 'knowledge_conflicts' in tables:db.execute('DELETE FROM knowledge_conflicts WHERE material_id=?',(mid,))
             if mode=='course':
                 if 'knowledge_questions' in tables:
+                    ids=[r[0] for r in db.execute('SELECT id FROM knowledge_concepts WHERE course_id=?',(course_id,))]
+                    for cid in ids:
+                        if 'knowledge_angles' in tables:
+                            for angle in db.execute('SELECT id FROM knowledge_angles WHERE concept_id=?',(cid,)).fetchall():
+                                db.execute('DELETE FROM knowledge_question_angles WHERE angle_id=?',(angle[0],));db.execute('DELETE FROM knowledge_angle_sources WHERE angle_id=?',(angle[0],))
+                            for table in ('knowledge_angles','knowledge_angle_reviews','knowledge_short_reservations','knowledge_evidence_blocks'):db.execute(f'DELETE FROM {table} WHERE concept_id=?',(cid,))
                     db.execute('DELETE FROM knowledge_questions WHERE concept_id IN (SELECT id FROM knowledge_concepts WHERE course_id=?)',(course_id,))
                     db.execute('DELETE FROM knowledge_concepts WHERE course_id=?',(course_id,))
                     db.execute('DELETE FROM knowledge_conflicts WHERE course_id=?',(course_id,))

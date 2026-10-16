@@ -11,6 +11,10 @@ from .test_practice import sample_question
 
 class FakeAI:
     def json(self,model,instruction,data):
+        if '为每个独立知识点识别' in instruction:
+            return {'items':[{'index':i['index'],'angles':[{'target':i['statement'],'document_id':i['document_id'],'ordinal':i['ordinal'],'quote':i['text'],'existing_id':next((c['id'] for c in i['candidates'] if c['target']==i['statement']),None)}]} for i in data['items']]},{}
+        if '独立逐项审核每个考查角度' in instruction:
+            return {'approved':[[True]*len(i['angles']) for i in data['items']],'simple_fact':[False]*len(data['items'])},{}
         if '识别所有独立' in instruction:
             return {'concepts':[{'title':b['text'][:8],'statement':b['text'],'document_id':b['document_id'],'ordinal':b['ordinal'],'quote':b['text']} for b in data['blocks']]},{}
         if '独立检查每点' in instruction:return {'approved':[True]*len(data['concepts']),'short_answer':[True]*len(data['concepts'])},{}
@@ -65,12 +69,12 @@ class KnowledgeWorkflowTests(unittest.TestCase):
         from .cloud import CloudError
         class OneFailure(FakeAI):
             def json(self,model,instruction,data):
-                if 'items' in data and any('待复核' in x['incoming']['statement'] for x in data['items']):raise CloudError('timeout')
+                if 'items' in data and any('incoming' in x and '待复核' in x['incoming']['statement'] for x in data['items']):raise CloudError('timeout')
                 return super().json(model,instruction,data)
         with patch.object(knowledge,'Starflow',OneFailure):
             mid=self.add('缓存未命中时应回源获取内容。\n\n待复核资料说明客户需要授权。\n\nI帧可以独立解码。')
-        m=self.m(mid);self.assertEqual(m['processing_state'],'ready');self.assertEqual(m['pending_concepts'],1);self.assertEqual(m['concepts'],2);self.assertEqual(m['cap'],4)
-        self.learned(mid);self.assertEqual(self.m(mid)['remaining'],4)
+        m=self.m(mid);self.assertEqual(m['processing_state'],'ready');self.assertEqual(m['pending_concepts'],1);self.assertEqual(m['concepts'],2);self.assertEqual(m['cap'],2)
+        self.learned(mid);self.assertEqual(self.m(mid)['remaining'],2)
 
     def test_malformed_review_retries_without_accepting_single_boolean(self):
         calls=[]
@@ -93,7 +97,7 @@ class KnowledgeWorkflowTests(unittest.TestCase):
         with patch.object(knowledge,'Starflow',BadQuote):mid=self.add('缓存未命中时应回源获取内容。\n\nI帧可以独立解码。')
         self.assertEqual(self.m(mid)['processing_state'],'ready')
         self.assertEqual(self.m(mid)['concepts'],1);self.assertEqual(self.m(mid)['pending_concepts'],1)
-        self.assertEqual(self.m(mid)['cap'],2)
+        self.assertEqual(self.m(mid)['cap'],1)
 
     def test_layout_whitespace_is_restored_to_literal_source_quote(self):
         blocks=[{'document_id':'d','ordinal':2,'text':'控制信令\n负责协商，媒体流承载音视频。'}]
@@ -110,8 +114,8 @@ class KnowledgeWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):knowledge.anchor_candidates([c],blocks+[{**blocks[0],'ordinal':5}])
 
     def test_short_precise_document_has_concept_budget_not_word_budget(self):
-        mid=self.add();m=self.m(mid);self.assertEqual(m['processing_state'],'ready');self.assertLess(m['words'],200);self.assertEqual(m['cap'],2);self.assertEqual(m['remaining'],0)
-        self.learned(mid);self.assertEqual((self.m(mid)['choice_remaining'],self.m(mid)['short_remaining']),(1,1))
+        mid=self.add();m=self.m(mid);self.assertEqual(m['processing_state'],'ready');self.assertLess(m['words'],200);self.assertEqual(m['cap'],1);self.assertEqual(m['remaining'],0)
+        self.learned(mid);self.assertEqual((self.m(mid)['choice_remaining'],self.m(mid)['short_remaining']),(1,0))
     def test_simple_fact_does_not_automatically_get_short_answer_budget(self):
         class FactAI(FakeAI):
             def json(self,model,instruction,data):
@@ -130,31 +134,31 @@ class KnowledgeWorkflowTests(unittest.TestCase):
         a=self.add();b=self.add(title='重复材料');self.learned(a);self.learned(b)
         overview=knowledge.overview(self.cid,'alice');self.assertEqual(len(overview['concepts']),1);self.assertEqual(overview['concepts'][0]['materials'],2)
         run=self.package(a,['single_choice']*3);self.assertEqual(bank.register(run,'alice'),1)
-        self.assertEqual(self.m(b)['choice_remaining'],0);self.assertEqual(self.m(b)['short_remaining'],1)
-        run=self.package(b,['short_answer']);self.assertEqual(bank.register(run,'alice'),1)
+        self.assertEqual(self.m(b)['choice_remaining'],0);self.assertEqual(self.m(b)['short_remaining'],0)
+        run=self.package(b,['short_answer']);self.assertEqual(bank.register(run,'alice'),0)
         self.assertEqual(self.m(a)['remaining'],0)
-    def test_media_budget_reserves_half_for_short(self):
+    def test_media_obeys_shared_course_twenty_percent_limit(self):
         mid=self.add()
         with connect(self.db) as db:
             db.execute('DELETE FROM knowledge_evidence');db.execute('DELETE FROM knowledge_concepts');db.execute('DELETE FROM knowledge_jobs');db.execute("UPDATE material_heads SET quality='media',state='indexing' WHERE id=?",(mid,))
-        versions.process(mid,'alice');self.learned(mid);self.assertEqual((self.m(mid)['cap'],self.m(mid)['choice_remaining'],self.m(mid)['short_remaining']),(2,1,1))
+        versions.process(mid,'alice');self.learned(mid);self.assertEqual((self.m(mid)['cap'],self.m(mid)['choice_remaining'],self.m(mid)['short_remaining']),(1,1,0))
     def test_update_requires_withdrawal_and_keeps_material_id(self):
         mid=self.add();self.learned(mid)
         with self.assertRaises(ValueError):versions.update(self.cid,mid,'alice','更新','text',text='缓存未命中时应回源获取内容。')
         policy.set_learned(self.cid,mid,'alice',False)
         versions.update(self.cid,mid,'alice','更新','text',text='缓存未命中时应回源获取内容。\n\n缓存有效期为60秒，超时必须回源。');versions.process(mid,'alice')
-        self.assertEqual(len(policy.materials(self.cid,'alice')),1);self.assertFalse(self.m(mid)['learned']);self.assertEqual(self.m(mid)['cap'],4);self.assertEqual(len(versions.history(self.cid,mid,'alice')),2)
+        self.assertEqual(len(policy.materials(self.cid,'alice')),1);self.assertFalse(self.m(mid)['learned']);self.assertEqual(self.m(mid)['cap'],2);self.assertEqual(len(versions.history(self.cid,mid,'alice')),2)
     def test_update_preserves_unchanged_question_but_stops_changed_block(self):
         mid=self.add('缓存未命中时应回源获取内容。\n\n缓存有效期为60秒，超时必须回源。');self.learned(mid)
         good=self.package(mid,['single_choice']);changed=self.package(mid,['single_choice'],2);bank.register(good,'alice');bank.register(changed,'alice')
         policy.set_learned(self.cid,mid,'alice',False);self.assertEqual(bank.entries('alice'),[])
         versions.update(self.cid,mid,'alice','更新','text',text='缓存未命中时应回源获取内容。\n\n缓存有效期为120秒，超时必须回源。');versions.process(mid,'alice');self.learned(mid)
-        self.assertEqual([r['run_id'] for r in bank.entries('alice')],[good]);self.assertEqual(self.m(mid)['used'],2);self.assertEqual(self.m(mid)['cap'],4)
+        self.assertEqual([r['run_id'] for r in bank.entries('alice')],[good]);self.assertEqual(self.m(mid)['used'],2);self.assertEqual(self.m(mid)['cap'],2)
         with self.assertRaises(ValueError):practice.start(changed,'q0','alice')
     def test_reupload_same_content_does_not_increase_cap(self):
         mid=self.add();self.learned(mid);run=self.package(mid,['single_choice']);bank.register(run,'alice');policy.set_learned(self.cid,mid,'alice',False)
         versions.update(self.cid,mid,'alice','同内容','text',text='缓存未命中时应回源获取内容。');versions.process(mid,'alice');self.learned(mid)
-        self.assertEqual((self.m(mid)['cap'],self.m(mid)['used']),(2,1))
+        self.assertEqual((self.m(mid)['cap'],self.m(mid)['used']),(1,1))
     def test_ownership_and_bank_clear_do_not_refund_budget(self):
         mid=self.add();self.learned(mid);run=self.package(mid,['single_choice']);bank.register(run,'alice')
         with self.assertRaises(LookupError):versions.history(self.cid,mid,'bob')
@@ -179,16 +183,16 @@ class KnowledgeWorkflowTests(unittest.TestCase):
         from concurrent.futures import ThreadPoolExecutor
         mid=self.add();self.learned(mid);runs=[self.package(mid,['single_choice']*2) for _ in range(2)]
         with ThreadPoolExecutor(max_workers=2) as pool:counts=list(pool.map(lambda run:bank.register(run,'alice'),runs))
-        self.assertEqual(sum(counts),1);self.assertEqual(self.m(mid)['short_remaining'],1)
+        self.assertEqual(sum(counts),1);self.assertEqual(self.m(mid)['short_remaining'],0)
 
-    def test_explicit_conflict_resolution_withdraws_old_material_without_new_quota(self):
+    def test_explicit_conflict_resolution_preserves_other_material_learning_without_new_quota(self):
         a=self.add('缓存有效期为60秒，超时必须回源。');self.learned(a);b=self.add('缓存有效期为120秒，超时必须回源。',title='新结论')
         conflict=knowledge.overview(self.cid,'alice')['conflicts'][0]
         with self.assertRaises(LookupError):knowledge.resolve_conflict(self.cid,conflict['id'],'bob')
         result=knowledge.resolve_conflict(self.cid,conflict['id'],'alice')
-        self.assertFalse(result['quota_increased']);self.assertFalse(self.m(a)['learned']);self.assertFalse(self.m(b)['learned']);self.assertEqual(self.m(b)['cap'],2)
+        self.assertFalse(result['quota_increased']);self.assertTrue(self.m(a)['learned']);self.assertFalse(self.m(b)['learned']);self.assertEqual(self.m(b)['cap'],1)
         self.learned(b)
-        with self.assertRaises(ValueError):self.learned(a)
+        self.learned(a)  # Only the rejected concept is suspended; material remains usable.
 
     def test_material_rename_preserves_learning_quota_versions_and_evidence(self):
         mid=self.add();self.learned(mid);before=self.m(mid)
@@ -239,7 +243,9 @@ class KnowledgeWorkflowTests(unittest.TestCase):
         frames=[c.args[0] for c in ff.call_args_list if '-ss' in c.args[0]];self.assertEqual([a[a.index('-ss')+1] for a in frames],['5.0','27.5'])
 
     def test_withdrawal_during_cloud_grading_cannot_update_mastery(self):
-        mid=self.add();self.learned(mid);run=self.package(mid,['short_answer']);bank.register(run,'alice');sid=bank.start_review(run,'q0','alice')['session_id']
+        mid=self.add();
+        for i in range(4):self.add(f'独立事实{i}说明材料需要授权。')
+        self.learned(mid);run=self.package(mid,['short_answer']);bank.register(run,'alice');sid=bank.start_review(run,'q0','alice')['session_id']
         parent=self
         class Grader:
             def json(self,model,instruction,data):

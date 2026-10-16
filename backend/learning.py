@@ -197,7 +197,7 @@ def generate(course_id,owner):
             if material['learned'] and material.get('budget_rule') in ('knowledge-v1','knowledge-v2'):
                 try:
                     outcome=index_material(course_id,material['id'],owner,material['documents'],material['quality'])
-                    if outcome and outcome['conflicts']:
+                    if outcome and outcome['conflicts'] and not outcome['concepts']:
                         with connect() as db:db.execute("UPDATE material_heads SET state='conflict' WHERE id=?",(material['id'],))
                         index_failed.add(material['id'])
                 except Exception:
@@ -206,17 +206,29 @@ def generate(course_id,owner):
         # Seed choice questions for every newly learned material; short-answer budget stays reserved.
         pending=bool(index_failed) or enrichment_pending
         for material in policy.materials(course_id,owner):
-            if not material['learned'] or material.get('processing_state') not in (None,'ready') or material['remaining']<=0 or material['used']>0:continue
+            if not material['learned'] or material.get('processing_state') not in (None,'ready') or material['remaining']<=0:continue
             if material['id'] in index_failed:continue
             if generation_health(material['id'])['next_at']>time.time():pending=True;continue
-            history=bank.history(owner,course_id)
-            try:
-                run=run_sample(course_id=course_id,material_id=material['id'],choice_count=min(2,material.get('choice_remaining',material['remaining'])),
-                    previous_questions=[{'prompt':q['prompt'],'options':q.get('options',[])} for q in history])
-                admitted=bank.register(run,owner);record_generation(course_id,material['id'],admitted)
-                if not admitted:pending=True
-            except (Exception,SystemExit):
-                record_generation(course_id,material['id'],0);pending=True
+            # Reserve-first: prepare all currently assigned short questions in bounded batches.
+            if material.get('short_remaining',0)>0:
+                history=bank.history(owner,course_id)
+                try:
+                    run=run_sample(course_id=course_id,material_id=material['id'],mixed_count=min(3,material['short_remaining']),short_only=True,
+                        previous_questions=[{'prompt':q['prompt'],'options':q.get('options',[])} for q in history])
+                    admitted=bank.register(run,owner);record_generation(course_id,material['id'],admitted)
+                    if not admitted:pending=True
+                except (Exception,SystemExit):record_generation(course_id,material['id'],0);pending=True
+            # Keep the small initial choice seed; later choice generation remains daily/on demand.
+            current=next(m for m in policy.materials(course_id,owner) if m['id']==material['id'])
+            if current['used']==current.get('short_used',0) and current.get('choice_remaining',0)>0:
+                history=bank.history(owner,course_id)
+                try:
+                    run=run_sample(course_id=course_id,material_id=material['id'],choice_count=min(2,current['choice_remaining']),
+                        previous_questions=[{'prompt':q['prompt'],'options':q.get('options',[])} for q in history])
+                    admitted=bank.register(run,owner);record_generation(course_id,material['id'],admitted)
+                    if not admitted:pending=True
+                except (Exception,SystemExit):record_generation(course_id,material['id'],0);pending=True
+        if any(m['learned'] and m.get('short_remaining',0)>0 for m in policy.materials(course_id,owner)):pending=True
         if pending:
             with connect() as db:db.execute("UPDATE course_jobs SET state='queued',next_at=?,error=? WHERE course_id=?",(time.time()+60,'部分材料首批题仍在审核，按材料单独重试。',course_id))
             return
@@ -228,31 +240,11 @@ def generate(course_id,owner):
             db.execute("UPDATE course_jobs SET state='queued',next_at=?,error=? WHERE course_id=?",(time.time()+1800,'资料整理或首批题审核未完成，稍后重试；不会超出材料上限。',course_id))
     finally:GENERATION_LOCK.release()
 
-def prepare_review(course_id,owner,count=5):
-    """Small on-demand mixed batch; never fills the lifetime cap in one request."""
-    from . import bank,material_policy as policy
-    from .pipeline import run_sample
-    plan=bank.review_plan(course_id,owner,count)
-    if len(plan['questions'])>=count and any(q['kind']=='short_answer' for q in plan['questions']):return plan
-    if not GENERATION_LOCK.acquire(blocking=False):return {**plan,'message':'资料或题目处理中，先使用已有题目；可稍后重试。'}
-    try:
-        attempts=0
-        for m in policy.materials(course_id,owner):
-            if attempts>=2:break
-            if not m['learned'] or not m['remaining']:continue
-            current=bank.review_plan(course_id,owner,count)
-            needs_short=not any(q['kind']=='short_answer' for q in current['questions']) and m.get('short_remaining',0)>0
-            if len(current['questions'])>=count and not needs_short:break
-            history=bank.history(owner,course_id)
-            try:
-                attempts+=1
-                run=run_sample(course_id=course_id,material_id=m['id'],mixed_count=1 if needs_short else min(2,m['remaining']),short_only=needs_short,
-                    previous_questions=[{'prompt':q['prompt'],'options':q.get('options',[])} for q in history])
-                bank.register(run,owner)
-            except Exception:continue
-        result=bank.review_plan(course_id,owner,count)
-        return {**result,'message':'题库不足时按需生成小批新题，最多尝试两批；审核或额度不足时使用已有题目。'}
-    finally:GENERATION_LOCK.release()
+def prepare_review(course_id,owner,count=30):
+    """Review uses only the current valid bank; never generates to fill a round."""
+    from . import bank
+    count=max(1,min(30,count))
+    return {**bank.review_plan(course_id,owner,count),'message':'按当前有效题库安排，最多30题；不足按实际数量提供，不临时补题。'}
 
 
 def worker(stop):
@@ -263,7 +255,8 @@ def worker(stop):
             if not any(r['learned'] for r in materials(c['id'],'local-owner')):continue
             with connect() as db:
                 row=db.execute('SELECT * FROM course_jobs WHERE course_id=?',(c['id'],)).fetchone()
-            if not row:enqueue(c['id'],'local-owner')
+            if not row or (row['state'] in ('idle','ready') and any(m['learned'] and m.get('short_remaining',0)>0 for m in materials(c['id'],'local-owner'))):
+                enqueue(c['id'],'local-owner');row=None
             if not row or (row['state'] not in ('idle','ready') and row['next_at']<=time.time()):generate(c['id'],'local-owner')
         stop.wait(30)
 

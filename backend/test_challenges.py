@@ -34,7 +34,10 @@ class ChallengeTests(unittest.TestCase):
                                  [(1, 'text', '缓存可以减少回源请求。'+''.join(chr(0x4e00+i) for i in range(20000)))], '文字')
             library.approve(doc['document_id'], 'local-owner', {1: '缓存'})
         for course in ('a','b'):
-            for m in material_policy.materials(course,'local-owner'):material_policy.set_learned(course,m['id'],'local-owner')
+            for m in material_policy.materials(course,'local-owner'):
+                from .test_quota_fixtures import reviewed
+                with connect(self.path) as db:reviewed(db,course,m['id'],100,separate=True)
+                material_policy.set_learned(course,m['id'],'local-owner')
         self.counter = 0
 
     def tearDown(self):
@@ -49,11 +52,15 @@ class ChallengeTests(unittest.TestCase):
         rows = library.evidence(kwargs['course_id'], 'local-owner')
         q = sample_question()
         questions = []
-        for i in range(kwargs['choice_count']):
+        from .question_quota import course_state
+        with connect(self.path) as db:
+            state=course_state(db,kwargs['course_id'],'local-owner')
+            candidates=[cid for cid,c in state['concepts'].items() if c['choice_remaining']>0]
+        for i in range(min(kwargs['choice_count'],len(candidates))):
             prompt = hashlib.sha256(f'{run}:{i}'.encode()).hexdigest()+'场景判断'
-            questions.append(dict(q, id=f'q{i+1}', prompt=prompt))
+            questions.append(dict(q, id=f'q{i+1}',concept_id=f'c{i+1}',prompt=prompt))
         self.packages[run] = {'run_id':run,'course_id':kwargs['course_id'],
-            'questions':questions,'framework':{'concepts':[{'id':'c1','evidence':q['evidence']}]},
+            'questions':questions,'stable_concepts':{f'c{i+1}':cid for i,cid in enumerate(candidates[:len(questions)])},'framework':{'concepts':[{'id':q['concept_id'],'evidence':q['evidence']} for q in questions]},
             'evidence_map':{'1':{k:rows[0][k] for k in ('document_id','scope_revision','ordinal','digest')}}}
         return run
 
@@ -136,6 +143,9 @@ class ChallengeTests(unittest.TestCase):
     def test_deep_review_plan_mixes_types_without_exposing_answers(self):
         run = self.fake_pipeline(course_id='a',choice_count=3)
         q = self.packages[run]['questions'][-1]
+        with connect(self.path) as db:
+            cid=self.packages[run]['stable_concepts'][q['concept_id']]
+            db.execute('UPDATE knowledge_angle_reviews SET short_eligible=1 WHERE concept_id=?',(cid,))
         q.update(kind='short_answer',options=[],answer_index=None,rubric=[
             {'id':'r1','point':'缓存机制','weight':100,'full':'说明减少回源',
              'partial':'只提缓存','zero':'遗漏或相反'}])

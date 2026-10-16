@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 from . import library
 from .store import connect
-from .cloud import ParsingStarflow as Starflow, starflow_key
+from .cloud import ParsingStarflow as Starflow, starflow_key, CloudError
 from .settings import configure
 from . import ai_rules
 
@@ -31,6 +31,8 @@ def initialize(db):
         db.execute("ALTER TABLE knowledge_conflicts ADD COLUMN details TEXT NOT NULL DEFAULT '{}' ")
     if 'input_hash' not in {r[1] for r in db.execute('PRAGMA table_info(knowledge_audits)')}:
         db.execute("ALTER TABLE knowledge_audits ADD COLUMN input_hash TEXT NOT NULL DEFAULT ''")
+    from .question_quota import initialize as initialize_quota
+    initialize_quota(db)
 
 def embed(texts):
     configure()
@@ -78,6 +80,9 @@ def index_material(course_id,mid,owner,documents,quality):
     with connect() as db:
         initialize(db);library.allowed(db,course_id,owner)
         blocks=[dict(r) for doc in documents for r in db.execute('SELECT document_id,ordinal,text FROM library_evidence WHERE document_id=? ORDER BY ordinal',(doc,))]
+    # Keep existing reviewed checkpoints: upgrading rules must not reprocess all
+    # personal material or silently consume model calls. Explicit retry/new body
+    # runs the new angle review; migration grants no speculative extra angles.
     digest=hashlib.sha256(json.dumps(blocks,ensure_ascii=False).encode()).hexdigest()
     with connect() as db:
         old=db.execute('SELECT * FROM knowledge_jobs WHERE material_id=?',(mid,)).fetchone()
@@ -93,6 +98,15 @@ def index_material(course_id,mid,owner,documents,quality):
         with connect() as db:
             cached=db.execute('SELECT result,metadata FROM knowledge_audits WHERE material_id=? AND digest=? AND stage=? AND model=? AND input_hash=? ORDER BY created_at DESC LIMIT 1',(mid,digest,stage,model,input_hash)).fetchone()
         def valid(value):
+            if stage=='angle_extract':
+                rows=value.get('items')
+                return (isinstance(rows,list) and len(rows)==len(data['items']) and
+                        all(isinstance(r,dict) and type(r.get('index'))is int and isinstance(r.get('angles'),list) for r in rows) and
+                        {r['index'] for r in rows}=={r['index'] for r in data['items']})
+            if stage=='angle_review':
+                flags=value.get('approved');simple=value.get('simple_fact')
+                return (isinstance(flags,list) and len(flags)==len(data['items']) and isinstance(simple,list) and len(simple)==len(flags) and all(type(x)is bool for x in simple) and
+                        all(isinstance(f,list) and len(f)==len(item['angles']) and all(type(x)is bool for x in f) for f,item in zip(flags,data['items'])))
             if stage in ('extract','anchor_repair'):
                 rows=value.get('concepts')
                 return isinstance(rows,list) and all(isinstance(c,dict) and isinstance(c.get('title'),str) and isinstance(c.get('statement'),str) and isinstance(c.get('quote'),str) for c in rows)
@@ -169,7 +183,13 @@ def index_material(course_id,mid,owner,documents,quality):
         return accepted
     progress('知识点提取与原文审核',0,len(chunks))
     def extracting(batch):
-        result=extract_batch(batch)
+        try:result=extract_batch(batch)
+        except (CloudError,ValueError):
+            # A failed batch becomes pending evidence, not an invented concept,
+            # and must not discard already reviewed points from other batches.
+            with progress_lock:
+                extraction_pending.extend({'title':'正文块待复核','statement':'该块尚未完成知识点独立审核','document_id':b['document_id'],'ordinal':b['ordinal'],'quote':b['text'][:600]} for b in batch)
+            result=[]
         with progress_lock:
             completed[0]+=1;progress('知识点提取与原文审核',completed[0],len(chunks))
         return result
@@ -283,14 +303,74 @@ def index_material(course_id,mid,owner,documents,quality):
         db.executemany('UPDATE knowledge_concepts SET title=?,statement=?,vector=?,revision=revision+1 WHERE id=?',corrections)
         db.execute('DELETE FROM knowledge_pending WHERE material_id=?',(mid,))
         db.executemany('INSERT INTO knowledge_pending VALUES(?,?,?,?)',pending)
-        db.execute('DELETE FROM knowledge_evidence WHERE material_id=?',(mid,))
+        # Keep old evidence as a historical anchor; active-version checks decide use.
         db.execute('DELETE FROM knowledge_conflicts WHERE material_id=?',(mid,))
         db.executemany('INSERT OR IGNORE INTO knowledge_evidence VALUES(?,?,?,?,?)',links)
         db.executemany('INSERT INTO knowledge_conflicts VALUES(?,?,?,?,?,?,?)',conflicts)
         db.execute('INSERT OR REPLACE INTO knowledge_jobs VALUES(?,?,?)',(mid,digest,'conflict' if conflicts else 'partial' if pending else 'ready'))
     progress('知识点登记完成',1,1)
+    assess_angles(course_id,mid,owner,links,blocks,concepts,call)
     adopt_history(course_id,mid,owner)
-    return {'relations':relations,'conflicts':len(conflicts),'concepts':len({r[0] for r in links}),'pending':len(pending)}
+    with connect() as db:pending_count=db.execute('SELECT count(*) FROM knowledge_pending WHERE material_id=?',(mid,)).fetchone()[0]
+    return {'relations':relations,'conflicts':len(conflicts),'concepts':len({r[0] for r in links}),'pending':pending_count}
+
+def assess_angles(course_id,mid,owner,links,blocks,concepts,call):
+    from .question_quota import sync_angles,normalize
+    items=[]
+    seen=set()
+    for cid,material,doc,ordinal,quote in links:
+        if cid in seen:continue
+        seen.add(cid)
+        c=next((c for c in concepts if c['document_id']==doc and c['ordinal']==ordinal and c['quote']==quote),None)
+        if not c:continue
+        source=next(b for b in blocks if b['document_id']==doc and b['ordinal']==ordinal)
+        with connect() as db:
+            old=[dict(r) for r in db.execute('SELECT id,target FROM knowledge_angles WHERE concept_id=?',(cid,))]
+            reviewed=db.execute('SELECT audited,short_eligible FROM knowledge_angle_reviews WHERE concept_id=?',(cid,)).fetchone()
+            previous=[dict(r) for r in db.execute('SELECT a.id existing_id,a.target,s.quote FROM knowledge_angles a JOIN knowledge_angle_sources s ON s.angle_id=a.id WHERE a.concept_id=?',(cid,))]
+            reusable={a['existing_id']:{**a,'document_id':doc,'ordinal':ordinal} for a in previous if a['quote'] in source['text']}
+            if reviewed and reviewed['audited'] and reusable:
+                sync_angles(db,cid,mid,list(reusable.values()),bool(reviewed['short_eligible']))
+                continue
+        items.append({'index':len(items),'concept_id':cid,'statement':c['statement'],'short_eligible':bool(c.get('short_answer')),'document_id':doc,'ordinal':ordinal,'text':source['text'],'candidates':old})
+    for offset in range(0,len(items),ai_rules.EVIDENCE_REVIEW_ITEMS):
+        batch=items[offset:offset+ai_rules.EVIDENCE_REVIEW_ITEMS]
+        try:
+            proposal,_=call('angle_extract','mimo-v2.6-pro',GUARD+
+                '为每个独立知识点识别有原文依据且互不重复的考查角度。含义/适用条件、机制、操作决策、限制/异常可形成不同目标；换措辞、数字、例子、正反问法和题型不是新角度；不能按每个步骤机械计额，独立其他事实必须先另立知识点。'
+                '简单名词、参数、清单、孤立结论只有1个事实角度。与candidates中的考查目标等价时必须返回其existing_id，不因原文版本或措辞变化增加角度。'
+                '输出{items:[{index:输入index,angles:[{target:明确可考目标,document_id:原文ID,ordinal:原文编号,quote:5至600字符连续原文,existing_id:候选ID或null}]}]}。不凑数量，无依据返回空angles。',{'items':batch})
+            ordered=[]
+            for item in batch:
+                row=next(r for r in proposal['items'] if r['index']==item['index'])
+                angles=[];keys=set()
+                for a in row['angles']:
+                    if not isinstance(a,dict) or not isinstance(a.get('target'),str) or not 2<=len(a['target'])<=300:continue
+                    if a.get('document_id')!=item['document_id'] or a.get('ordinal')!=item['ordinal']:continue
+                    if not isinstance(a.get('quote'),str) or not 5<=len(a['quote'])<=600 or a['quote'] not in item['text']:continue
+                    if a.get('existing_id') and a['existing_id'] not in {x['id'] for x in item['candidates']}:continue
+                    key=a.get('existing_id') or normalize(a['target'])
+                    if key not in keys:angles.append(a);keys.add(key)
+                ordered.append({**item,'angles':angles})
+            review,_=call('angle_review','glm-5.3',GUARD+
+                '独立逐项审核每个考查角度是否有连续原文依据、属于本知识点、完整可靠且与本点其他角度及candidates的目标实质不同。题型、问法、数字和同类例子不能增加角度；等价旧目标必须映射existing_id。不得把其他独立知识点混入。'
+                '独立判断是否仅为简单名词/参数/清单/孤立结论（simple_fact）。逐输入顺序输出{approved:[[逐角度布尔]],simple_fact:[逐知识点布尔]}；不合格拒绝，不输出摘要。',{'items':ordered})
+            for item,flags,simple in zip(ordered,review['approved'],review['simple_fact']):
+                approved=[a for a,flag in zip(item['angles'],flags) if flag]
+                if simple:approved=approved[:1]
+                if not approved:
+                    with connect() as db:
+                        db.execute('INSERT OR REPLACE INTO knowledge_pending VALUES(?,?,?,?)',(mid,100000+item['index'],json.dumps(item,ensure_ascii=False),'没有审核通过的考查角度'))
+                        db.execute("UPDATE knowledge_jobs SET state='partial' WHERE material_id=?",(mid,))
+                    continue
+                with connect() as db:
+                    sync_angles(db,item['concept_id'],mid,approved,item['short_eligible'] and not simple)
+        except (ValueError,KeyError,StopIteration,CloudError) as error:
+            with connect() as db:
+                for item in batch:
+                    db.execute('INSERT OR REPLACE INTO knowledge_pending VALUES(?,?,?,?)',(mid,100000+item['index'],json.dumps(item,ensure_ascii=False),'考查角度独立审核未通过，保留其他可靠考点'))
+                db.execute("UPDATE knowledge_jobs SET state='partial' WHERE material_id=?",(mid,))
+
 
 def adopt_history(course_id,mid,owner):
     """Grandfather lifetime charges from legacy banks; never refund deleted questions."""
@@ -321,58 +401,75 @@ def adopt_history(course_id,mid,owner):
                     for e in db.execute('SELECT * FROM mastery_events WHERE owner=? AND concept=? ORDER BY n',(owner,r['concept_key'])).fetchall():
                         db.execute('INSERT OR IGNORE INTO mastery_events VALUES(?,?,?,?,?,?,?,?,?)',(uuid.uuid4().hex,owner,newkey,e['day'],e['q'],e['before'],e['after'],e['n'],e['rule']))
 
-def budget(db,mid,owner):
-    rows=[dict(r) for r in db.execute('SELECT DISTINCT c.* FROM knowledge_concepts c JOIN knowledge_evidence e ON e.concept_id=c.id WHERE e.material_id=?',(mid,))]
-    result={'cap':0,'used':0,'choice_remaining':0,'short_remaining':0,'concepts':len(rows),'pending_concepts':db.execute('SELECT count(*) FROM knowledge_pending WHERE material_id=?',(mid,)).fetchone()[0]}
-    for c in rows:
-        counts={r['kind']:r['n'] for r in db.execute('SELECT kind,count(*) n FROM knowledge_questions WHERE owner=? AND concept_id=? GROUP BY kind',(owner,c['id']))}
-        result['cap']+=c['choice_cap']+c['short_cap'];result['used']+=sum(counts.values())
-        result['choice_remaining']+=max(0,c['choice_cap']-counts.get('single_choice',0));result['short_remaining']+=max(0,c['short_cap']-counts.get('short_answer',0))
-    result['remaining']=result['choice_remaining']+result['short_remaining']
-    return result
+def budget(db,mid,owner,state=None):
+    from .question_quota import course_state,evidence_valid
+    row=db.execute('SELECT course_id FROM material_learning WHERE id=?',(mid,)).fetchone()
+    if not row:return {'cap':0,'used':0,'remaining':0,'choice_remaining':0,'short_remaining':0,'concepts':0,'pending_concepts':0}
+    state=state if state is not None else course_state(db,row[0],owner)
+    ids={r[0] for r in db.execute('SELECT DISTINCT concept_id FROM knowledge_evidence WHERE material_id=?',(mid,))}
+    relevant=[]
+    for cid in ids:
+        if cid not in state['concepts']:continue
+        c=state['concepts'][cid]
+        usable=any(evidence_valid(db,cid,mid,e['document_id'],e['ordinal']) for e in db.execute('SELECT * FROM knowledge_evidence WHERE concept_id=? AND material_id=?',(cid,mid)))
+        relevant.append(c if usable else {**c,'cap':0,'remaining':0,'choice_remaining':0,'short_remaining':0})
+    return {**{k:sum(c[k] for c in relevant) for k in ('cap','used','remaining','choice_remaining','short_remaining','short_used')},'concepts':sum(c['cap']>0 for c in relevant),
+        'pending_concepts':db.execute('SELECT count(*) FROM knowledge_pending WHERE material_id=?',(mid,)).fetchone()[0],
+        'conflicts':db.execute("SELECT count(*) FROM knowledge_conflicts WHERE material_id=? AND status='pending'",(mid,)).fetchone()[0],
+        'shared':True,'course_cap':state['cap'],'course_used':state['used'],'course_short_limit':state['short_limit']}
+
 
 def mastery_key(db,course_id,cid):
     row=db.execute('SELECT revision FROM knowledge_concepts WHERE id=?',(cid,)).fetchone()
     return course_id+':knowledge:'+cid+(':r'+str(row[0]) if row and row[0]>1 else '')
 
 def framework(course_id,owner,evidence,kind=None,selection_seed=None):
+    from .question_quota import course_state,evidence_valid
     with connect() as db:
         initialize(db);library.allowed(db,course_id,owner)
-        rows=[dict(r) for r in db.execute('SELECT c.*,e.document_id,e.ordinal,e.quote FROM knowledge_concepts c JOIN knowledge_evidence e ON e.concept_id=c.id WHERE c.course_id=?',(course_id,))]
-        counts={(r['concept_id'],r['kind']):r['n'] for r in db.execute('SELECT concept_id,kind,count(*) n FROM knowledge_questions WHERE owner=? GROUP BY concept_id,kind',(owner,))}
-    if selection_seed:
-        rows.sort(key=lambda r:(not bool(r['short_cap']),hashlib.sha256((selection_seed+r['id']).encode()).hexdigest()))
+        state=course_state(db,course_id,owner)
+        rows=[dict(r) for r in db.execute('SELECT c.*,e.material_id,e.document_id,e.ordinal,e.quote FROM knowledge_concepts c JOIN knowledge_evidence e ON e.concept_id=c.id WHERE c.course_id=?',(course_id,))]
+        rows=[r for r in rows if evidence_valid(db,r['id'],r['material_id'],r['document_id'],r['ordinal'])]
+    if selection_seed:rows.sort(key=lambda r:(not bool(state['concepts'][r['id']]['short_remaining']),hashlib.sha256((selection_seed+r['id']).encode()).hexdigest()))
     selected={};mapping={}
     for r in rows:
-        choices=max(0,r['choice_cap']-counts.get((r['id'],'single_choice'),0));short=max(0,r['short_cap']-counts.get((r['id'],'short_answer'),0))
-        if (kind=='single_choice' and not choices) or (kind=='short_answer' and not short) or (not kind and not choices+short):continue
+        status=state['concepts'][r['id']]
+        if not (status['choice_remaining'] if kind=='single_choice' else status['short_remaining'] if kind=='short_answer' else status['remaining']):continue
         block=next((i for i,e in enumerate(evidence,1) if e['document_id']==r['document_id'] and e['ordinal']==r['ordinal'] and r['quote'] in e['text']),None)
         if not block:continue
+        angles=[]
+        for a in status['angles']:
+            anchors=[]
+            for source in a['sources']:
+                position=next((i for i,e in enumerate(evidence,1) if e['document_id']==source['document_id'] and e['ordinal']==source['ordinal'] and source['quote'] in e['text']),None)
+                if position:anchors.append({'block':position,'quote':source['quote']})
+            if anchors:angles.append({'id':a['id'],'target':a['target'],'evidence':anchors})
+        if not angles:continue
         if r['id'] not in selected:
             if len(selected)>=12:continue
             cid='c'+str(len(selected)+1);mapping[cid]=r['id']
-            selected[r['id']]={'id':cid,'title':r['title'],'summary':r['statement'],'evidence':[{'block':block,'quote':r['quote']}]}
+            selected[r['id']]={'id':cid,'title':r['title'],'summary':r['statement'],'evidence':[{'block':block,'quote':r['quote']}],'angles':angles}
     return {'concepts':list(selected.values())},mapping
 
+
 def validate_admission(db,package,q,owner):
-    cid=package.get('stable_concepts',{}).get(q['concept_id'])
-    if not cid:return None
-    c=db.execute('SELECT * FROM knowledge_concepts WHERE id=? AND course_id=?',(cid,package['course_id'])).fetchone()
-    if not c:return None
-    anchored=False
-    for e in q['evidence']:
-        source=package.get('evidence_map',{}).get(str(e['block']))
-        if source and db.execute('SELECT 1 FROM knowledge_evidence WHERE concept_id=? AND document_id=? AND ordinal=?',(cid,source['document_id'],source['ordinal'])).fetchone():anchored=True
-    if not anchored:return None
-    field='choice_cap' if q['kind']=='single_choice' else 'short_cap'
-    used=db.execute('SELECT count(*) FROM knowledge_questions WHERE owner=? AND concept_id=? AND kind=?',(owner,cid,q['kind'])).fetchone()[0]
-    return cid if used<c[field] else None
+    from .question_quota import coverage
+    result=coverage(db,package,q,owner)
+    return result[0] if result else None
+
 
 def overview(course_id,owner):
+    from .question_quota import course_state
     with connect() as db:
-        initialize(db);library.allowed(db,course_id,owner)
-        return {'concepts':[dict(r) for r in db.execute('SELECT c.id,c.title,c.statement,c.choice_cap,c.short_cap,count(DISTINCT e.material_id) materials FROM knowledge_concepts c JOIN knowledge_evidence e ON e.concept_id=c.id WHERE c.course_id=? GROUP BY c.id',(course_id,))],
+        initialize(db);library.allowed(db,course_id,owner);state=course_state(db,course_id,owner)
+        rows=[dict(r) for r in db.execute('SELECT c.id,c.title,c.statement,count(DISTINCT e.material_id) materials FROM knowledge_concepts c JOIN knowledge_evidence e ON e.concept_id=c.id WHERE c.course_id=? GROUP BY c.id',(course_id,))]
+        for c in rows:
+            q=state['concepts'][c['id']]
+            c.update({k:q[k] for k in ('cap','used','remaining','choice_remaining','short_remaining','held')})
+            c['angles']=[{'id':a['id'],'target':a['target']} for a in q['angles']]
+        return {'concepts':rows,'cap':state['cap'],'used':state['used'],'short_limit':state['short_limit'],'short_used':state['short_used'],
                 'conflicts':[dict(r) for r in db.execute("SELECT id,material_id,statement,status FROM knowledge_conflicts WHERE course_id=? AND status='pending'",(course_id,))]}
+
 
 def resolve_conflict(course_id,conflict_id,owner):
     from .material_versions import mutation
@@ -385,14 +482,19 @@ def resolve_conflict(course_id,conflict_id,owner):
             h=db.execute('SELECT document_id FROM material_heads WHERE id=?',(mid,)).fetchone()
             if not h or h[0]!=c['document_id']:raise ValueError('材料版本已变化，请重新处理')
             others={r[0] for r in db.execute('SELECT DISTINCT material_id FROM knowledge_evidence WHERE concept_id=? AND material_id!=?',(cid,mid))}
-            for other in others:
-                db.execute('UPDATE material_learning SET learned=0 WHERE id=?',(other,))
-                db.execute("UPDATE material_heads SET state='conflict',error='其他材料已被用户指定为正确版本，请更新本材料后重试' WHERE id=?",(other,))
+            # Suspend only the disputed concept's evidence, never unrelated material.
+            for e in db.execute('SELECT * FROM knowledge_evidence WHERE concept_id=?',(cid,)).fetchall():
+                db.execute('INSERT OR IGNORE INTO knowledge_evidence_blocks VALUES(?,?,?,?)',(cid,e['material_id'],e['document_id'],e['ordinal']))
             db.execute('UPDATE knowledge_concepts SET title=?,statement=?,vector=?,revision=revision+1 WHERE id=?',(c['title'],c['statement'],json.dumps(details['vector']),cid))
             db.execute('INSERT OR REPLACE INTO knowledge_evidence VALUES(?,?,?,?,?)',(cid,mid,c['document_id'],c['ordinal'],c['quote']))
-            db.execute("UPDATE knowledge_conflicts SET status='resolved' WHERE id=?",(conflict_id,))
+            db.execute('DELETE FROM knowledge_evidence_blocks WHERE concept_id=? AND material_id=? AND document_id=? AND ordinal=?',(cid,mid,c['document_id'],c['ordinal']))
+            db.execute("UPDATE knowledge_conflicts SET status='resolved' WHERE concept_id=? AND status='pending'",(cid,))
+            from .question_quota import sync_angles
+            old_angle=db.execute('SELECT id FROM knowledge_angles WHERE concept_id=? ORDER BY id LIMIT 1',(cid,)).fetchone()
+            if old_angle:
+                sync_angles(db,cid,mid,[{'existing_id':old_angle[0],'target':c['statement'],'document_id':c['document_id'],'ordinal':c['ordinal'],'quote':c['quote']}],bool(c.get('short_answer')))
             pending=db.execute("SELECT count(*) FROM knowledge_conflicts WHERE material_id=? AND status='pending'",(mid,)).fetchone()[0]
             if not pending:
                 db.execute("UPDATE material_heads SET state='ready',error=NULL WHERE id=?",(mid,));db.execute("UPDATE knowledge_jobs SET state='ready' WHERE material_id=?",(mid,))
             db.execute('UPDATE material_learning SET learned=0 WHERE id=?',(mid,))
-    return {'state':'conflict' if pending else 'ready','learned':False,'withdrawn_materials':len(others),'quota_increased':False}
+    return {'state':'conflict' if pending else 'ready','learned':False,'withdrawn_materials':0,'suspended_concepts':1,'quota_increased':False}

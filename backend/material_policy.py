@@ -84,10 +84,16 @@ def snapshot(db,course_id,owner):
         db.execute('INSERT OR IGNORE INTO material_learning VALUES(?,?,0)',(mid,course_id))
         flag=db.execute('SELECT learned FROM material_learning WHERE id=?',(mid,)).fetchone()
         result[mid]={**item,'id':mid,'learned':bool(flag['learned']),'parsed':False,'documents':[],'texts':[]}
+    from .question_quota import course_state
+    shared_state=course_state(db,course_id,owner)
     for row in result.values():
-        count=word_count(row.pop('texts'));row['words']=count;row['cap']=count//200
+        count=word_count(row.pop('texts'));row['words']=count;row['cap']=0
         row['used']=db.execute('SELECT count(*) FROM bank_materials WHERE owner=? AND material_id=?',(owner,row['id'])).fetchone()[0]
         row['remaining']=max(0,row['cap']-row['used']) if row['learned'] else 0
+        if row['id'] not in managed and db.execute('SELECT 1 FROM knowledge_evidence WHERE material_id=?',(row['id'],)).fetchone():
+            from .knowledge import budget
+            row.update(budget(db,row['id'],owner,shared_state));row['budget_rule']='knowledge-v2'
+            if not row['learned']:row['remaining']=row['choice_remaining']=row['short_remaining']=0
     for mid,h in managed.items():
         if mid not in result:result[mid]={'id':mid,'title':h['title'],'origin':h['origin'],'learned':bool(db.execute('SELECT learned FROM material_learning WHERE id=?',(mid,)).fetchone()[0]),'parsed':bool(h['document_id']),'documents':[],'words':0,'cap':0,'used':0,'remaining':0}
         row=result[mid];row.update(title=h['title'],upload_id=h['upload_id'],version=h['version'],quality=h['quality'],kind=h['kind'],processing_state=h['state'],error=h['error'])
@@ -115,7 +121,7 @@ def snapshot(db,course_id,owner):
             if health:row['generation_health']=dict(health)
         row['choice_remaining']=row['short_remaining']=0
         from .knowledge import budget
-        row.update(budget(db,mid,owner));row['budget_rule']='knowledge-v2'
+        row.update(budget(db,mid,owner,shared_state));row['budget_rule']='knowledge-v2'
         if not row['learned'] or h['state']!='ready':row['remaining']=row['choice_remaining']=row['short_remaining']=0
     return result,mapping
 
@@ -143,6 +149,13 @@ def check_question(package,question,owner,context=None):
             initialize(db);rows,mapping=snapshot(db,package['course_id'],owner)
             if context is not None:context[cache_key]=(rows,mapping)
         from .material_versions import resolve_evidence
+        from .question_quota import held
+        cid=package.get('stable_concepts',{}).get(question['concept_id'])
+        if cid and held(db,cid):raise ValueError('该考点存在待核对冲突，其他可靠考点仍可练习')
+        if cid:
+            for e in question['evidence']:
+                source=package.get('evidence_map',{}).get(str(e['block']))
+                if source and db.execute('SELECT 1 FROM knowledge_evidence_blocks WHERE concept_id=? AND document_id=? AND ordinal=?',(cid,source['document_id'],source['ordinal'])).fetchone():raise ValueError('该考点原结论已失效')
         resolved={}
         concepts=next((c for c in package.get('framework',{}).get('concepts',[]) if c['id']==question['concept_id']),{})
         for e in question['evidence']+concepts.get('evidence',[]):

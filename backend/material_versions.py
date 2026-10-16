@@ -342,10 +342,12 @@ def _finish(h,owner):
             reports.append(result)
         changes['analysis']={'summary':'\n'.join(r['summary'] for r in reports),'wording_only':all(r['wording_only'] for r in reports),**{k:[v for r in reports for v in r[k]] for k in ('added','removed','corrected')}}
     outcome=index_material(h['course_id'],h['id'],owner,[h['document_id']],h['quality'])
+    if outcome and not outcome['concepts'] and outcome.get('pending') and not outcome['conflicts']:
+        raise ValueError('正文已保存，可靠知识点审核尚未完成，请稍后续审')
     changes['knowledge']=outcome
     with connect() as db:
         db.execute('UPDATE material_versions SET digest=?,changes=? WHERE material_id=? AND version=?',(hashlib.sha256(current.encode()).hexdigest(),json.dumps(changes,ensure_ascii=False),h['id'],h['version']))
-        db.execute('UPDATE material_heads SET state=?,error=?,next_at=0 WHERE id=?',('conflict' if outcome and outcome['conflicts'] else 'ready',('正文已解析；'+str(outcome['pending'])+'个知识点待复核，暂不纳入出题。可重新处理以续审。') if outcome and outcome.get('pending') else None,h['id']))
+        db.execute('UPDATE material_heads SET state=?,error=?,next_at=0 WHERE id=?',('conflict' if outcome and outcome['conflicts'] and not outcome['concepts'] else 'ready',('正文已解析；'+str(outcome['pending'])+'个知识点待复核，暂不纳入出题。可重新处理以续审。') if outcome and outcome.get('pending') else None,h['id']))
         db.execute("UPDATE learning_materials SET state='scope_confirmation' WHERE id=?",(h['upload_id'],))
 
 def history(course_id,mid,owner):
@@ -361,6 +363,9 @@ def retry(course_id,mid,owner):
         if not row:raise LookupError('资料不存在')
         if row[0] in ('processing','indexing','review'):raise ValueError('请等待处理或先审核时间轴')
         db.execute("UPDATE material_heads SET state='queued',next_at=0,error=NULL WHERE id=?",(mid,))
+        # Explicit user retry may audit the new angle contract; ordinary restart
+        # keeps reviewed checkpoints and never reprocesses every user's material.
+        db.execute("UPDATE knowledge_jobs SET state='queued' WHERE material_id=?",(mid,))
     return {'state':'queued'}
 
 def worker(stop):

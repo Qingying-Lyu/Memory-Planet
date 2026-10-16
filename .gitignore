@@ -5,6 +5,8 @@ backups/
 recovery/
 runtime/
 models/
+_snapshot_work/
+_implementation_work/
 __pycache__/
 *.py[cod]
 .env

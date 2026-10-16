@@ -1,7 +1,7 @@
 """Versioned routing rules for local orchestration. Agents are bounded task roles."""
 from dataclasses import dataclass,asdict
 
-VERSION='2026-10-12.2'
+VERSION='2026-10-16.angles-v1'
 CONCURRENCY=3
 TEXT_BATCH_CHARS=4000
 EVIDENCE_REVIEW_ITEMS=6
@@ -17,6 +17,8 @@ class Rule:
     format_attempts: int=2
 
 RULES={
+ 'angle_extract':Rule('独立考查角度提取','mimo-v2.6-pro',120,12000),
+ 'angle_review':Rule('考查角度独立审核','glm-5.3',120,12000),
  'extract':Rule('知识点提取','mimo-v2.6-pro',120,12000),
  'anchor_repair':Rule('引用修复','mimo-v2.6-pro',120,12000),
  'evidence_review':Rule('原文独立审核','glm-5.3',120,12000),

@@ -162,7 +162,7 @@ def overview(user=Depends(owner)):
 
 class ReviewPlan(BaseModel):
     course_id:str
-    count:int=Field(default=5,ge=1,le=30)
+    count:int=Field(default=30,ge=1,le=30)
 
 @app.post('/review/plan')
 def plan_review(body:ReviewPlan,user=Depends(owner)):
@@ -387,9 +387,17 @@ class ConflictResolution(BaseModel):
     confirm:bool=False
 @app.post('/courses/{course_id}/knowledge/conflicts/{conflict_id}/resolve')
 def resolve_knowledge_conflict(course_id:str,conflict_id:str,body:ConflictResolution,user=Depends(owner)):
-    if not body.confirm:raise HTTPException(422,'请确认采用该结论并撤回冲突材料')
+    if not body.confirm:raise HTTPException(422,'请确认采用该结论并暂停该争议考点的旧依据')
     from .knowledge import resolve_conflict
     return resolve_conflict(course_id,conflict_id,user)
+
+@app.post('/courses/{course_id}/knowledge/{concept_id}/release-short')
+def release_short_reserve(course_id:str,concept_id:str,body:ConflictResolution,user=Depends(owner)):
+    if not body.confirm:raise HTTPException(422,'请确认放弃该考点尚未使用的简答预留，已用额度不返还')
+    from .material_versions import mutation
+    from .question_quota import release_short
+    with mutation():
+        with connect() as db:return release_short(db,course_id,concept_id,user)
 
 @app.get('/courses/{course_id}/study-materials/{material_id}/alignment')
 def media_alignment(course_id:str,material_id:str,user=Depends(owner)):

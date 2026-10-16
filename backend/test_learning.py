@@ -9,7 +9,7 @@ class LearningTests(unittest.TestCase):
   self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);self.path=self.root/'db.sqlite3'
   self.patches=[patch.object(m,'connect',lambda:connect(self.path)) for m in (learning,library,bank,enrichment,practice,policy,challenges)]
   self.patches += [patch.object(learning,'MATERIALS',self.root/'materials'),patch.object(library,'LIBRARY',self.root/'library'),patch.object(bank,'ROOT',self.root)]
-  # Historical fixtures exercise grandfathered word budgets before adoption.
+  # Fixtures explicitly declare reviewed objectives; text length grants no budget.
   self.patches += [patch('backend.material_versions.track',return_value=None)]
   self.patches += [patch('backend.material_versions.heads',return_value=[])]
   for p in self.patches:p.start()
@@ -22,11 +22,16 @@ class LearningTests(unittest.TestCase):
   course=learning.create('local-owner','缓存课程','training')['id']
   learning.add(course,'local-owner','资料一','text',text='缓存原理。'+'字'*996)
   material=policy.materials(course,'local-owner')[0]
+  from .test_quota_fixtures import reviewed
+  with connect(self.path) as db:reviewed(db,course,material['id'],5)
   policy.set_learned(course,material['id'],'local-owner')
   return course,material['id']
  def package(self,course,run,count):
+  with connect(self.path) as db:
+   stable=db.execute('SELECT id FROM knowledge_concepts WHERE course_id=?',(course,)).fetchone()[0]
+   angles=[r[0] for r in db.execute('SELECT id FROM knowledge_angles WHERE concept_id=? ORDER BY id',(stable,))]
   rows=library.evidence(course,'local-owner');q=sample_question()
-  self.packages[run]={'run_id':run,'course_id':course,'questions':[dict(q,id=f'q{i}',prompt=hashlib.sha256(f'{run}-{i}'.encode()).hexdigest()+'缓存场景判断') for i in range(count)],'framework':{'concepts':[{'id':'c1','evidence':q['evidence']}]},'evidence_map':{'1':{k:rows[0][k] for k in ('document_id','ordinal','scope_revision','digest')}}}
+  self.packages[run]={'run_id':run,'course_id':course,'stable_concepts':{'c1':stable},'questions':[dict(q,id=f'q{i}',angle_ids=[angles[(i+(1 if run=='run2' else 0))%len(angles)]],prompt=hashlib.sha256(f'{run}-{i}'.encode()).hexdigest()+'缓存场景判断') for i in range(count)],'framework':{'concepts':[{'id':'c1','evidence':q['evidence']}]},'evidence_map':{'1':{k:rows[0][k] for k in ('document_id','ordinal','scope_revision','digest')}}}
  def test_cap_counts_accepted_only_and_deep_review_survives_exhaustion(self):
   course,mid=self.create();self.package(course,'run1',10)
   self.assertEqual(bank.register('run1','local-owner'),5)
@@ -53,11 +58,12 @@ class LearningTests(unittest.TestCase):
   policy.set_learned(course,pending['id'],'local-owner')
   pending=next(m for m in policy.materials(course,'local-owner') if m['id']==pending['id'])
   self.assertTrue(pending['learned']);self.assertEqual(pending['remaining'],0)
- def test_word_count_deduplicates_and_caps_are_monotonic(self):
+ def test_word_count_is_only_statistics_not_question_allowance(self):
   self.assertEqual(policy.word_count(['缓存 cache 123','缓存 cache 123']),4)
-  self.assertEqual(policy.word_count(['字'*199])//200,0)
-  self.assertEqual(policy.word_count(['字'*200])//200,1)
-  self.assertEqual(policy.word_count(['字'*10000])//200,50)
+  course,mid=self.create()
+  learning.add(course,'local-owner','未经知识点审核的长文','text',text='字'*10000)
+  other=next(m for m in policy.materials(course,'local-owner') if m['id']!=mid)
+  self.assertEqual(other['cap'],0)
  def test_weighted_allocation_keeps_low_frequency_for_mastered_courses(self):
   credits={};counts={'weak':0,'strong':0}
   for day in range(30):
