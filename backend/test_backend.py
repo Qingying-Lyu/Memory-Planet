@@ -18,7 +18,7 @@ class Tests(unittest.TestCase):
    with self.assertRaises(ValueError):update(None,q,1)
  def test_import_idempotent(self):
   with tempfile.TemporaryDirectory() as d:
-   p=Path(d)/'db';fixture=Path(d)/'课程'/'直播CDN核心知识体系.docx';fixture.parent.mkdir()
+   p=Path(d)/'db';fixture=Path(d)/'课程'/'sample.docx';fixture.parent.mkdir()
    with zipfile.ZipFile(fixture,'w') as z:z.writestr('word/document.xml','<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>测试正文</w:t></w:r></w:p></w:body></w:document>')
    with patch.object(store,'ROOT',Path(d)):a=import_sample(p);import_sample(p)
    with connect(p) as c:

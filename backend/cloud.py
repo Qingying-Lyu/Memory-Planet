@@ -18,6 +18,8 @@ class CloudError(RuntimeError):
 
 def read_secret_file(path):
     data = Path(path).read_bytes()
+    from .credentials import PREFIX,unseal
+    if data.startswith(PREFIX):return unseal(data)
     for encoding in ('utf-8-sig', 'utf-16', 'gb18030'):
         try:
             return data.decode(encoding).strip()
@@ -153,7 +155,7 @@ class KS3:
         if set(credentials) != {'ak', 'sk'} or any(not v or '*' in v or any(c.isspace() for c in v) for v in credentials.values()):
             raise CloudError('KS3凭证格式不正确')
         self.ak, self.sk = credentials['ak'], credentials['sk']
-        self.bucket = os.environ.get('ZHIWEN_KS3_BUCKET', 'lvqingying-xiaoy')
+        self.bucket = os.environ.get('ZHIWEN_KS3_BUCKET', '')
         if not re.fullmatch(r'[a-z0-9-]+', self.bucket):
             raise CloudError('Bucket格式不正确')
 

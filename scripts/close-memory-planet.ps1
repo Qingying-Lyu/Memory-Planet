@@ -1,12 +1,13 @@
 ﻿param([switch]$CheckOnly)
 $ErrorActionPreference = 'Stop'
-$taskRecordPath = Join-Path $PSScriptRoot 'data/backend-process.json'
+$taskRoot = Split-Path -Parent $PSScriptRoot
+$taskRecordPath = Join-Path $taskRoot 'data/backend-process.json'
 if (-not (Test-Path -LiteralPath $taskRecordPath)) {
     Write-Host '没有本目录启动的后台记录，无需关闭。若后台由旧脚本或终端启动，请从原入口结束。'
     exit 0
 }
 $taskRecord = Get-Content -LiteralPath $taskRecordPath -Raw | ConvertFrom-Json
-if ($taskRecord.root -ne $PSScriptRoot) { throw '后台记录目录不匹配，未关闭任何进程。' }
+if ($taskRecord.root -ne $taskRoot) { throw '后台记录目录不匹配，未关闭任何进程。' }
 $taskProcess = Get-Process -Id ([int]$taskRecord.pid) -ErrorAction SilentlyContinue
 if (-not $taskProcess) { Write-Host '记忆星球后台已关闭。'; exit 0 }
 $taskStarted = [datetime]::Parse($taskRecord.started_utc).ToUniversalTime()

@@ -1,3 +1,4 @@
+from .browser_runtime import launch as launch_browser
 """Bounded Ksyun product-directory capture; no course data mutations."""
 import hashlib,json,re,threading
 from concurrent.futures import ThreadPoolExecutor
@@ -88,7 +89,7 @@ def article(raw,url):
 def rendered_article(url):
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        browser=p.chromium.launch(channel='msedge',headless=True)
+        browser=launch_browser(p)
         try:
             page=browser.new_page()
             page.goto(url,wait_until='domcontentloaded',timeout=45000)

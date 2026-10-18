@@ -1,3 +1,4 @@
+from .browser_runtime import launch as launch_browser
 """Local structured office readers and authorized cloud export fallback."""
 from pathlib import Path
 import json
@@ -46,7 +47,7 @@ def cloud_export(url,secret_file,folder,kind):
     from .wps_reader import validate_url,session_value
     validate_url(url);folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as p:
-        b=p.chromium.launch(channel='msedge',headless=True)
+        b=launch_browser(p)
         try:
             c=b.new_context(accept_downloads=True)
             c.add_cookies([{'name':'wps_sid','value':session_value(secret_file),'domain':'.kdocs.cn','path':'/','secure':True}])

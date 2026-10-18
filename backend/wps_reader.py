@@ -1,3 +1,4 @@
+from .browser_runtime import launch as launch_browser
 """Authenticated local reader. Cookie never enters snapshots, Markdown or model inputs."""
 import argparse
 import json
@@ -81,7 +82,7 @@ def collect_note(url, secret_file, folder):
     visual_assets = {}
     capture_attempts = {}
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel='msedge', headless=True)
+        browser = launch_browser(playwright)
         try:
             context = browser.new_context()
             context.add_cookies([{'name': 'wps_sid', 'value': session_value(secret_file),
@@ -158,7 +159,7 @@ def collect_presentation(url, secret_file, folder):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel='msedge', headless=True)
+        browser = launch_browser(playwright)
         try:
             context = browser.new_context(viewport={'width': 1440, 'height': 1000})
             context.add_cookies([{'name': 'wps_sid', 'value': session_value(secret_file),
@@ -260,7 +261,7 @@ def detect_browser_type(url,secret_file):
     from playwright.sync_api import sync_playwright
     validate_url(url)
     with sync_playwright() as p:
-        b=p.chromium.launch(channel='msedge',headless=True)
+        b=launch_browser(p)
         try:
             c=b.new_context();c.add_cookies([{'name':'wps_sid','value':session_value(secret_file),'domain':host,'path':'/','secure':True} for host in ('.kdocs.cn','.wps.cn')])
             page=c.new_page();page.goto(url,wait_until='domcontentloaded',timeout=45000)
@@ -280,7 +281,7 @@ def collect_diagram(url,secret_file,folder):
     from playwright.sync_api import sync_playwright
     validate_url(url);folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as p:
-        b=p.chromium.launch(channel='msedge',headless=True)
+        b=launch_browser(p)
         try:
             c=b.new_context();c.add_cookies([{'name':'wps_sid','value':session_value(secret_file),'domain':'.kdocs.cn','path':'/','secure':True}])
             page=c.new_page();contents=[];permissions={};canvases=[]
@@ -349,7 +350,7 @@ def collect_word(url, secret_file, folder):
     validate_url(url)
     folder = Path(folder); folder.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel='msedge', headless=True)
+        browser = launch_browser(p)
         try:
             context = browser.new_context(viewport={'width':1600,'height':1450})
             context.add_cookies([{'name':'wps_sid','value':session_value(secret_file),
@@ -413,7 +414,7 @@ def collect_video(url, secret_file, folder, extract_audio=False):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel='msedge', headless=True)
+        browser = launch_browser(playwright)
         try:
             context = browser.new_context()
             value = session_value(secret_file)

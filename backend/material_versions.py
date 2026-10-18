@@ -142,10 +142,11 @@ def extract(h):
     path=Path(h['location']);folder=path.parent/'extracted';folder.mkdir(exist_ok=True)
     if h['kind']=='link':
         from .settings import load
-        from .wps_reader import collect_note,collect_presentation,collect_video,collect_word,collect_diagram,detect_browser_type,document_type,probe
+        from .wps_reader import collect_note,collect_presentation,collect_video,collect_word,collect_diagram,detect_browser_type,document_type,probe,DocumentReadError
         url=h['origin'];host=urlsplit(url).hostname
         if host in ('365.kdocs.cn','plus.wps.cn'):
-            sid=load()['wps_session_file']
+            sid=load().get('wps_session_file')
+            if not sid:raise DocumentReadError('请先在连接设置中填写自己的wps_sid，再重试此材料')
             info=probe(url,sid)
             source_type=document_type(info,url)
             if source_type=='note' or (source_type=='video' and not Path(info.get('title','')).suffix):source_type=detect_browser_type(url,sid)

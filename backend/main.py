@@ -16,7 +16,14 @@ import threading
 @asynccontextmanager
 async def lifespan(app):
     stop = threading.Event()
-    if os.environ.get('ZHIWEN_SCHEDULER_ENABLED') == '1':
+    from .settings import ready
+    def start_when_ready():
+        while not stop.is_set():
+            if ready():
+                start_workers()
+                return
+            stop.wait(1)
+    def start_workers():
         from .material_versions import bootstrap
         bootstrap()
         from .challenges import worker
@@ -26,6 +33,8 @@ async def lifespan(app):
         threading.Thread(target=material_worker,args=(stop,),daemon=True,name='material-parser').start()
         from . import maintenance
         threading.Thread(target=maintenance.worker,args=(stop,),daemon=True,name='local-maintenance').start()
+    if os.environ.get('ZHIWEN_SCHEDULER_ENABLED') == '1':
+        threading.Thread(target=start_when_ready,daemon=True,name='configuration-gate').start()
     yield
     stop.set()
 
@@ -37,7 +46,62 @@ def owner(auth:HTTPAuthorizationCredentials=Depends(bearer)):
     if not token or auth is None or not secrets.compare_digest(auth.credentials,token):raise HTTPException(401,'需要本地访问令牌')
     return 'local-owner'
 @app.get('/health')
-def health():return {'status':'ok','mode':'local-development','ai_configured':bool(os.environ.get('ZHIWEN_STARFLOW_KEY_FILE') or os.environ.get('ZHIWEN_STARFLOW_KEY'))}
+def health():
+    from .settings import ready
+    return {'status':'ok','mode':'portable','version':'0.0.2-portable','ai_configured':ready()}
+
+@app.middleware('http')
+async def setup_gate(request,call_next):
+    from .settings import ready
+    path=request.url.path
+    if path.startswith(('/courses','/daily','/practice','/runs','/overview','/backups')) and not ready():
+        expected=os.environ.get('ZHIWEN_LOCAL_TOKEN','')
+        if not expected or not secrets.compare_digest(request.headers.get('authorization',''),'Bearer '+expected):
+            return JSONResponse(status_code=401,content={'detail':'需要本地访问令牌'})
+        return JSONResponse(status_code=409,content={'detail':'请先完成连接设置'})
+    response=await call_next(request)
+    if path.startswith('/setup') or path=='/client-state':
+        response.headers['Cache-Control']='no-store'
+        response.headers['Referrer-Policy']='no-referrer'
+    return response
+
+@app.get('/entry')
+def entry():
+    from .settings import ready
+    return RedirectResponse('/demo/index.html' if ready() else '/setup',headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
+@app.get('/setup')
+def setup_page():return FileResponse(ROOT/'demo/setup.html')
+@app.get('/setup/status')
+def setup_status(user=Depends(owner)):
+    from .settings import status
+    return status()
+class SetupInput(BaseModel):
+    api_key:str=Field(default='',max_length=4096)
+    wps_sid:str=Field(default='',max_length=8192)
+    clear_wps:bool=False
+@app.post('/setup/save')
+def setup_save(body:SetupInput,user=Depends(owner)):
+    from .settings import save
+    from .challenges import LOCK
+    from .material_versions import LOCK as material_lock
+    if not learning.GENERATION_LOCK.acquire(blocking=False):raise HTTPException(409,'材料或题目处理中，请稍后再修改连接设置')
+    try:
+        if not material_lock.acquire(blocking=False):raise HTTPException(409,'材料读取中，请稍后再修改连接设置')
+        try:
+            if not LOCK.acquire(blocking=False):raise HTTPException(409,'每日题处理中，请稍后再修改连接设置')
+            try:return save(body.api_key,body.wps_sid,body.clear_wps)
+            finally:LOCK.release()
+        finally:material_lock.release()
+    finally:learning.GENERATION_LOCK.release()
+@app.post('/setup/check')
+def setup_check(user=Depends(owner)):
+    from .cloud import starflow_key
+    import httpx
+    try:
+        r=httpx.get('https://kspmas.ksyun.com/v1/models',headers={'Authorization':'Bearer '+starflow_key()},timeout=20)
+        if r.status_code==200:return {'ok':True,'message':'星流连接及密钥认证通过；具体模型权限与余额以实际调用为准。'}
+        return {'ok':False,'message':'星流认证失败，请检查KEY。' if r.status_code in (401,403) else '暂未完成连接检查，可稍后重试。'}
+    except Exception:return {'ok':False,'message':'无法连接星流，请检查网络或稍后重试。'}
 
 @app.exception_handler(CloudError)
 async def cloud_error(request, exc):
@@ -245,7 +309,10 @@ def delete_course_content(course_id:str,body:CourseDeletion,user=Depends(owner))
 @app.get('/client-state')
 def client_reset_state(user=Depends(owner)):
     path=ROOT/'data/client-state.json'
-    return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'reset_id':'initial'}
+    if not path.exists():
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text(json.dumps({'reset_id':secrets.token_hex(16)}),encoding='utf-8')
+    return json.loads(path.read_text(encoding='utf-8'))
 
 @app.get('/courses/{course_id}/generation')
 def course_generation(course_id:str,user=Depends(owner)):

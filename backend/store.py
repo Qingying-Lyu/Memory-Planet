@@ -34,11 +34,11 @@ def extract_docx(path):
         return blocks,{'images':sum(1 for n in z.namelist() if n.startswith('word/media/')),'coverage':'仅正文段落和表格文本；图片、文本框阅读顺序、页眉页脚及图示含义待核对；位置使用正文块序号，不伪造页码。'}
 
 def import_sample(path=DB):
-    doc=ROOT/'课程'/'直播CDN核心知识体系.docx'
+    doc=ROOT/'课程'/'sample.docx'
     blocks,details=extract_docx(doc); digest=hashlib.sha256(doc.read_bytes()).hexdigest()
     with connect(path) as c:
-        c.execute('INSERT OR IGNORE INTO courses VALUES (?,?,?)',('cdn-edge','local-owner','CDN及边缘产品'))
-        sources=[('wps-video','边缘计算培训','https://plus.wps.cn/view/media/l/cbIvPALPrSmV'),('wps-doc','边缘计算产品培训','https://365.kdocs.cn/l/cbGfczXCzgvL'),('bilibili','B站课程','https://www.bilibili.com/video/BV1jS4y197zi/')]
+        c.execute('INSERT OR IGNORE INTO courses VALUES (?,?,?)',('cdn-edge','local-owner','示例课程'))
+        sources=[('sample-link-1','示例链接1','https://example.invalid/material/1'),('sample-link-2','示例链接2','https://example.invalid/material/2'),('sample-link-3','示例链接3','https://example.invalid/material/3')]
         for sid,title,url in sources:
             c.execute('INSERT OR IGNORE INTO sources VALUES (?,?,?,?,?,?,?)',(sid,'cdn-edge',title,url,'pending_access',None,json.dumps({'reason':'未取得正文，待授权读取或导出'},ensure_ascii=False)))
         c.execute('INSERT OR REPLACE INTO sources VALUES (?,?,?,?,?,?,?)',('cdn-docx','cdn-edge',doc.name,str(doc),'partial',digest,json.dumps(details,ensure_ascii=False)))
